@@ -8,11 +8,14 @@ use std::os::raw as libc;
 use std::ptr::NonNull;
 
 use self::iterator::*;
-use self::metadata::*;
-use super::bind::Binds;
-use crate::mysql::MysqlTypeMetadata;
+use super::bind::{BindData, Binds};
+use crate::mysql::MysqlType;
 use crate::result::{DatabaseErrorKind, QueryResult};
 
+pub use self::metadata::{MysqlFieldMetadata, StatementMetadata};
+
+#[allow(dead_code)]
+// https://github.com/rust-lang/rust/issues/81658
 pub struct Statement {
     stmt: NonNull<ffi::MYSQL_STMT>,
     input_binds: Option<Binds>,
@@ -21,7 +24,7 @@ pub struct Statement {
 impl Statement {
     pub(crate) fn new(stmt: NonNull<ffi::MYSQL_STMT>) -> Self {
         Statement {
-            stmt: stmt,
+            stmt,
             input_binds: None,
         }
     }
@@ -39,9 +42,13 @@ impl Statement {
 
     pub fn bind<Iter>(&mut self, binds: Iter) -> QueryResult<()>
     where
-        Iter: IntoIterator<Item = (MysqlTypeMetadata, Option<Vec<u8>>)>,
+        Iter: IntoIterator<Item = (MysqlType, Option<Vec<u8>>)>,
     {
-        let mut input_binds = Binds::from_input_data(binds);
+        let input_binds = Binds::from_input_data(binds)?;
+        self.input_bind(input_binds)
+    }
+
+    pub(super) fn input_bind(&mut self, mut input_binds: Binds) -> QueryResult<()> {
         input_binds.with_mysql_binds(|bind_ptr| {
             // This relies on the invariant that the current value of `self.input_binds`
             // will not change without this function being called
@@ -74,16 +81,9 @@ impl Statement {
     /// be called on this statement.
     pub unsafe fn results(
         &mut self,
-        types: Vec<MysqlTypeMetadata>,
+        types: Vec<Option<MysqlType>>,
     ) -> QueryResult<StatementIterator> {
         StatementIterator::new(self, types)
-    }
-
-    /// This function should be called instead of `execute` for queries which
-    /// have a return value. After calling this function, `execute` can never
-    /// be called on this statement.
-    pub unsafe fn named_results(&mut self) -> QueryResult<NamedStatementIterator> {
-        NamedStatementIterator::new(self)
     }
 
     fn last_error_message(&self) -> String {
@@ -114,17 +114,17 @@ impl Statement {
         self.did_an_error_occur()
     }
 
-    fn metadata(&self) -> QueryResult<StatementMetadata> {
+    pub(super) fn metadata(&self) -> QueryResult<StatementMetadata> {
         use crate::result::Error::DeserializationError;
 
-        let result_ptr = unsafe { ffi::mysql_stmt_result_metadata(self.stmt.as_ptr()).as_mut() };
+        let result_ptr = unsafe { ffi::mysql_stmt_result_metadata(self.stmt.as_ptr()) };
         self.did_an_error_occur()?;
-        result_ptr
+        NonNull::new(result_ptr)
             .map(StatementMetadata::new)
             .ok_or_else(|| DeserializationError("No metadata exists".into()))
     }
 
-    fn did_an_error_occur(&self) -> QueryResult<()> {
+    pub(super) fn did_an_error_occur(&self) -> QueryResult<()> {
         use crate::result::Error::DatabaseError;
 
         let error_message = self.last_error_message();
@@ -141,13 +141,36 @@ impl Statement {
     fn last_error_type(&self) -> DatabaseErrorKind {
         let last_error_number = unsafe { ffi::mysql_stmt_errno(self.stmt.as_ptr()) };
         // These values are not exposed by the C API, but are documented
-        // at https://dev.mysql.com/doc/refman/5.7/en/error-messages-server.html
+        // at https://dev.mysql.com/doc/refman/8.0/en/server-error-reference.html
         // and are from the ANSI SQLSTATE standard
         match last_error_number {
             1062 | 1586 | 1859 => DatabaseErrorKind::UniqueViolation,
             1216 | 1217 | 1451 | 1452 | 1830 | 1834 => DatabaseErrorKind::ForeignKeyViolation,
             1792 => DatabaseErrorKind::ReadOnlyTransaction,
-            _ => DatabaseErrorKind::__Unknown,
+            1048 | 1364 => DatabaseErrorKind::NotNullViolation,
+            3819 => DatabaseErrorKind::CheckViolation,
+            _ => DatabaseErrorKind::Unknown,
+        }
+    }
+
+    pub(super) fn execute_statement(&mut self, binds: &mut Binds) -> QueryResult<()> {
+        unsafe {
+            binds.with_mysql_binds(|bind_ptr| self.bind_result(bind_ptr))?;
+            self.execute()?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn populate_row_buffers(&self, binds: &mut Binds) -> QueryResult<Option<()>> {
+        let next_row_result = unsafe { ffi::mysql_stmt_fetch(self.stmt.as_ptr()) };
+        match next_row_result as libc::c_uint {
+            ffi::MYSQL_NO_DATA => Ok(None),
+            ffi::MYSQL_DATA_TRUNCATED => binds.populate_dynamic_buffers(self).map(Some),
+            0 => {
+                binds.update_buffer_lengths();
+                Ok(Some(()))
+            }
+            _error => self.did_an_error_occur().map(Some),
         }
     }
 }

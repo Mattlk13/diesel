@@ -13,10 +13,11 @@ pub fn derive(item: syn::DeriveInput) -> Result<proc_macro2::TokenStream, Diagno
     let pg_tokens = pg_tokens(&item);
 
     Ok(wrap_in_dummy_mod(quote! {
-        impl #impl_generics diesel::sql_types::NotNull
+        impl #impl_generics diesel::sql_types::SqlType
             for #struct_name #ty_generics
         #where_clause
         {
+            type IsNull = diesel::sql_types::is_nullable::NotNull;
         }
 
         impl #impl_generics diesel::sql_types::SingleValue
@@ -47,7 +48,7 @@ fn sqlite_tokens(item: &syn::DeriveInput) -> Option<proc_macro2::TokenStream> {
                     for diesel::sqlite::Sqlite
                 #where_clause
                 {
-                    fn metadata(_: &()) -> diesel::sqlite::SqliteType {
+                    fn metadata(_: &mut ()) -> diesel::sqlite::SqliteType {
                         diesel::sqlite::SqliteType::#ty
                     }
                 }
@@ -71,11 +72,8 @@ fn mysql_tokens(item: &syn::DeriveInput) -> Option<proc_macro2::TokenStream> {
                     for diesel::mysql::Mysql
                 #where_clause
                 {
-                    fn metadata(_: &()) -> diesel::mysql::MysqlTypeMetadata {
-                        diesel::mysql::MysqlTypeMetadata {
-                            data_type: diesel::mysql::MysqlType::#ty,
-                            is_unsigned: false,
-                        }
+                    fn metadata(_: &mut ()) -> diesel::mysql::MysqlType {
+                        diesel::mysql::MysqlType::#ty
                     }
                 }
             })
@@ -107,16 +105,18 @@ fn pg_tokens(item: &syn::DeriveInput) -> Option<proc_macro2::TokenStream> {
 
             let metadata_fn = match ty {
                 PgType::Fixed { oid, array_oid } => quote!(
-                    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-                        PgTypeMetadata {
-                            oid: #oid,
-                            array_oid: #array_oid,
-                        }
+                    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+                        PgTypeMetadata::new(#oid, #array_oid)
                     }
                 ),
-                PgType::Lookup(type_name) => quote!(
-                    fn metadata(lookup: &PgMetadataLookup) -> PgTypeMetadata {
-                        lookup.lookup_type(#type_name)
+                PgType::Lookup(type_name, Some(type_schema)) => quote!(
+                    fn metadata(lookup: &mut Self::MetadataLookup) -> PgTypeMetadata {
+                        lookup.lookup_type(#type_name, Some(#type_schema))
+                    }
+                ),
+                PgType::Lookup(type_name, None) => quote!(
+                    fn metadata(lookup: &mut Self::MetadataLookup) -> PgTypeMetadata {
+                        lookup.lookup_type(#type_name, None)
                     }
                 ),
             };
@@ -135,9 +135,13 @@ fn pg_tokens(item: &syn::DeriveInput) -> Option<proc_macro2::TokenStream> {
 }
 
 fn get_type_name(attr: &MetaItem) -> Result<Option<PgType>, Diagnostic> {
+    let schema = attr.nested_item("type_schema")?;
     Ok(attr.nested_item("type_name")?.map(|ty| {
-        attr.warn_if_other_options(&["type_name"]);
-        PgType::Lookup(ty.expect_str_value())
+        attr.warn_if_other_options(&["type_name", "type_schema"]);
+        PgType::Lookup(
+            ty.expect_str_value(),
+            schema.map(|schema| schema.expect_str_value()),
+        )
     }))
 }
 
@@ -157,5 +161,5 @@ fn get_oids(attr: &MetaItem) -> Result<Option<PgType>, Diagnostic> {
 
 enum PgType {
     Fixed { oid: u32, array_oid: u32 },
-    Lookup(String),
+    Lookup(String, Option<String>),
 }

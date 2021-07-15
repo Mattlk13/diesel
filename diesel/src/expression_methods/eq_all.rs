@@ -1,3 +1,4 @@
+use crate::expression::grouped::Grouped;
 use crate::expression::operators::And;
 use crate::expression::Expression;
 use crate::expression_methods::*;
@@ -26,10 +27,10 @@ macro_rules! impl_eq_all {
             $Left1: EqAll<$Right1>,
             ($($Left,)+): EqAll<($($Right,)+)>,
         {
-            type Output = And<
+            type Output = Grouped<And<
                 <$Left1 as EqAll<$Right1>>::Output,
                 <($($Left,)+) as EqAll<($($Right,)+)>>::Output,
-            >;
+            >>;
 
             fn eq_all(self, rhs: ($Right1, $($Right,)+)) -> Self::Output {
                 let ($Left1, $($Left,)+) = self;

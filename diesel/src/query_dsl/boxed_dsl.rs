@@ -1,5 +1,10 @@
+use crate::dsl;
+use crate::expression::TypedExpressionType;
+use crate::expression::ValidGrouping;
 use crate::query_builder::AsQuery;
+use crate::query_builder::SelectStatement;
 use crate::query_source::Table;
+use crate::Expression;
 
 /// The `into_boxed` method
 ///
@@ -7,21 +12,23 @@ use crate::query_source::Table;
 /// provided by [`QueryDsl`]. However, you may need a where clause on this trait
 /// to call `into_boxed` from generic code.
 ///
-/// [`QueryDsl`]: ../trait.QueryDsl.html
+/// [`QueryDsl`]: crate::QueryDsl
 pub trait BoxedDsl<'a, DB> {
     /// The return type of `internal_into_boxed`
     type Output;
 
     /// See the trait documentation.
-    fn internal_into_boxed(self) -> Self::Output;
+    fn internal_into_boxed(self) -> dsl::IntoBoxed<'a, Self, DB>;
 }
 
 impl<'a, T, DB> BoxedDsl<'a, DB> for T
 where
-    T: Table + AsQuery,
-    T::Query: BoxedDsl<'a, DB>,
+    T: Table + AsQuery<Query = SelectStatement<T>>,
+    SelectStatement<T>: BoxedDsl<'a, DB>,
+    T::DefaultSelection: Expression<SqlType = T::SqlType> + ValidGrouping<()>,
+    T::SqlType: TypedExpressionType,
 {
-    type Output = <T::Query as BoxedDsl<'a, DB>>::Output;
+    type Output = dsl::IntoBoxed<'a, SelectStatement<T>, DB>;
 
     fn internal_into_boxed(self) -> Self::Output {
         self.as_query().internal_into_boxed()

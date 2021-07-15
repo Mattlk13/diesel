@@ -5,7 +5,7 @@ use std::os::raw as libc;
 use std::ptr;
 
 use super::result::PgResult;
-use crate::pg::{PgConnection, PgTypeMetadata};
+use crate::pg::PgTypeMetadata;
 use crate::result::QueryResult;
 
 pub use super::raw::RawConnection;
@@ -19,7 +19,7 @@ impl Statement {
     #[allow(clippy::ptr_arg)]
     pub fn execute(
         &self,
-        conn: &PgConnection,
+        raw_connection: &mut RawConnection,
         param_data: &Vec<Option<Vec<u8>>>,
     ) -> QueryResult<PgResult> {
         let params_pointer = param_data
@@ -35,7 +35,7 @@ impl Statement {
             .map(|data| data.as_ref().map(|d| d.len() as libc::c_int).unwrap_or(0))
             .collect::<Vec<_>>();
         let internal_res = unsafe {
-            conn.raw_connection.exec_prepared(
+            raw_connection.exec_prepared(
                 self.name.as_ptr(),
                 params_pointer.len() as libc::c_int,
                 params_pointer.as_ptr(),
@@ -50,17 +50,21 @@ impl Statement {
 
     #[allow(clippy::ptr_arg)]
     pub fn prepare(
-        conn: &PgConnection,
+        raw_connection: &mut RawConnection,
         sql: &str,
         name: Option<&str>,
         param_types: &[PgTypeMetadata],
     ) -> QueryResult<Self> {
         let name = CString::new(name.unwrap_or(""))?;
         let sql = CString::new(sql)?;
-        let param_types_vec = param_types.iter().map(|x| x.oid).collect();
+        let param_types_vec = param_types
+            .iter()
+            .map(|x| x.oid())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| crate::result::Error::SerializationError(Box::new(e)))?;
 
         let internal_result = unsafe {
-            conn.raw_connection.prepare(
+            raw_connection.prepare(
                 name.as_ptr(),
                 sql.as_ptr(),
                 param_types.len() as libc::c_int,

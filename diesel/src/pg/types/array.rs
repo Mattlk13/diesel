@@ -3,7 +3,7 @@ use std::fmt;
 use std::io::Write;
 
 use crate::deserialize::{self, FromSql};
-use crate::pg::{Pg, PgMetadataLookup, PgTypeMetadata, PgValue};
+use crate::pg::{Pg, PgTypeMetadata, PgValue};
 use crate::serialize::{self, IsNull, Output, ToSql};
 use crate::sql_types::{Array, HasSqlType, Nullable};
 
@@ -11,10 +11,10 @@ impl<T> HasSqlType<Array<T>> for Pg
 where
     Pg: HasSqlType<T>,
 {
-    fn metadata(lookup: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: <Pg as HasSqlType<T>>::metadata(lookup).array_oid,
-            array_oid: 0,
+    fn metadata(lookup: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        match <Pg as HasSqlType<T>>::metadata(lookup).0 {
+            Ok(tpe) => PgTypeMetadata::new(tpe.array_oid, 0),
+            c @ Err(_) => PgTypeMetadata(c),
         }
     }
 }
@@ -23,8 +23,7 @@ impl<T, ST> FromSql<Array<ST>, Pg> for Vec<T>
 where
     T: FromSql<ST, Pg>,
 {
-    fn from_sql(value: Option<PgValue<'_>>) -> deserialize::Result<Self> {
-        let value = not_none!(value);
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
         let mut bytes = value.as_bytes();
         let num_dimensions = bytes.read_i32::<NetworkEndian>()?;
         let has_null = bytes.read_i32::<NetworkEndian>()? != 0;
@@ -45,11 +44,11 @@ where
             .map(|_| {
                 let elem_size = bytes.read_i32::<NetworkEndian>()?;
                 if has_null && elem_size == -1 {
-                    T::from_sql(None)
+                    T::from_nullable_sql(None)
                 } else {
                     let (elem_bytes, new_bytes) = bytes.split_at(elem_size as usize);
                     bytes = new_bytes;
-                    T::from_sql(Some(PgValue::new(elem_bytes, value.get_oid())))
+                    T::from_sql(PgValue::new(elem_bytes, value.get_oid()))
                 }
             })
             .collect()
@@ -92,15 +91,24 @@ where
         out.write_i32::<NetworkEndian>(num_dimensions)?;
         let flags = 0;
         out.write_i32::<NetworkEndian>(flags)?;
-        let element_oid = Pg::metadata(out.metadata_lookup()).oid;
+        let element_oid = Pg::metadata(out.metadata_lookup()).oid()?;
         out.write_u32::<NetworkEndian>(element_oid)?;
         out.write_i32::<NetworkEndian>(self.len() as i32)?;
         let lower_bound = 1;
         out.write_i32::<NetworkEndian>(lower_bound)?;
 
-        let mut buffer = out.with_buffer(Vec::new());
+        // This buffer is created outside of the loop to reuse the underlying memory allocation
+        // For most cases all array elements will have the same serialized size
+        let mut buffer = Vec::new();
+
         for elem in self.iter() {
-            let is_null = elem.to_sql(&mut buffer)?;
+            let is_null = {
+                let mut temp_buffer = Output::new(buffer, out.metadata_lookup());
+                let is_null = elem.to_sql(&mut temp_buffer)?;
+                buffer = temp_buffer.into_inner();
+                is_null
+            };
+
             if let IsNull::No = is_null {
                 out.write_i32::<NetworkEndian>(buffer.len() as i32)?;
                 out.write_all(&buffer)?;

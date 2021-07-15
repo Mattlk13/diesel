@@ -31,30 +31,21 @@ pub enum IsNull {
 
 /// Wraps a buffer to be written by `ToSql` with additional backend specific
 /// utilities.
-#[derive(Clone, Copy)]
 pub struct Output<'a, T, DB>
 where
     DB: TypeMetadata,
     DB::MetadataLookup: 'a,
 {
     out: T,
-    metadata_lookup: Option<&'a DB::MetadataLookup>,
+    metadata_lookup: Option<&'a mut DB::MetadataLookup>,
 }
 
 impl<'a, T, DB: TypeMetadata> Output<'a, T, DB> {
     /// Construct a new `Output`
-    pub fn new(out: T, metadata_lookup: &'a DB::MetadataLookup) -> Self {
+    pub fn new(out: T, metadata_lookup: &'a mut DB::MetadataLookup) -> Self {
         Output {
             out,
             metadata_lookup: Some(metadata_lookup),
-        }
-    }
-
-    /// Create a new `Output` with the given buffer
-    pub fn with_buffer<U>(&self, new_out: U) -> Output<'a, U, DB> {
-        Output {
-            out: new_out,
-            metadata_lookup: self.metadata_lookup,
         }
     }
 
@@ -65,8 +56,8 @@ impl<'a, T, DB: TypeMetadata> Output<'a, T, DB> {
 
     /// Returns the backend's mechanism for dynamically looking up type
     /// metadata at runtime, if relevant for the given backend.
-    pub fn metadata_lookup(&self) -> &'a DB::MetadataLookup {
-        self.metadata_lookup.expect("Lookup is there")
+    pub fn metadata_lookup(&mut self) -> &mut DB::MetadataLookup {
+        *self.metadata_lookup.as_mut().expect("Lookup is there")
     }
 }
 
@@ -145,7 +136,7 @@ where
 /// database, you should use `i32::to_sql(x, out)` instead of writing to `out`
 /// yourself.
 ///
-/// Any types which implement this trait should also `#[derive(AsExpression)]`.
+/// Any types which implement this trait should also [`#[derive(AsExpression)]`].
 ///
 /// ### Backend specific details
 ///
@@ -157,6 +148,7 @@ where
 /// - For third party backends, consult that backend's documentation.
 ///
 /// [`MysqlType`]: ../mysql/enum.MysqlType.html
+/// [`#[derive(AsExpression)]`]: ../expression/derive.AsExpression.html;
 ///
 /// ### Examples
 ///
@@ -165,12 +157,14 @@ where
 ///
 /// ```rust
 /// # use diesel::backend::Backend;
+/// # use diesel::expression::AsExpression;
 /// # use diesel::sql_types::*;
 /// # use diesel::serialize::{self, ToSql, Output};
 /// # use std::io::Write;
 /// #
 /// #[repr(i32)]
-/// #[derive(Debug, Clone, Copy)]
+/// #[derive(Debug, Clone, Copy, AsExpression)]
+/// #[sql_type = "Integer"]
 /// pub enum MyEnum {
 ///     A = 1,
 ///     B = 2,

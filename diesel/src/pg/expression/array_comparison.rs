@@ -1,31 +1,29 @@
 use crate::expression::subselect::Subselect;
-use crate::expression::{AsExpression, Expression};
+use crate::expression::{AsExpression, Expression, TypedExpressionType, ValidGrouping};
 use crate::pg::Pg;
 use crate::query_builder::*;
 use crate::result::QueryResult;
-use crate::sql_types::Array;
+use crate::sql_types::{Array, SqlType};
 
 /// Creates a PostgreSQL `ANY` expression.
 ///
 /// As with most bare functions, this is not exported by default. You can import
-/// it specifically from `diesel::expression::any`, or glob import
-/// `diesel::dsl::*`
+/// it specifically from `diesel::pg::expression::dsl::any`, or `diesel::dsl::any`.
 ///
 /// # Example
 ///
 /// ```rust
-/// # #[macro_use] extern crate diesel;
 /// # include!("../../doctest_setup.rs");
 /// # use diesel::dsl::*;
 /// #
 /// # fn main() {
 /// #     use schema::users::dsl::*;
-/// #     let connection = establish_connection();
+/// #     let connection = &mut establish_connection();
 /// #     connection.execute("INSERT INTO users (name) VALUES ('Jim')").unwrap();
 /// let sean = (1, "Sean".to_string());
 /// let jim = (3, "Jim".to_string());
 /// let data = users.filter(name.eq(any(vec!["Sean", "Jim"])));
-/// assert_eq!(Ok(vec![sean, jim]), data.load(&connection));
+/// assert_eq!(Ok(vec![sean, jim]), data.load(connection));
 /// # }
 /// ```
 pub fn any<ST, T>(vals: T) -> Any<T::Expression>
@@ -38,22 +36,21 @@ where
 /// Creates a PostgreSQL `ALL` expression.
 ///
 /// As with most bare functions, this is not exported by default. You can import
-/// it specifically as `diesel::dsl::all`.
+/// it specifically as `diesel::pg::expression::dsl::all`, or `diesel::dsl::all`.
 ///
 /// # Example
 ///
 /// ```rust
-/// # #[macro_use] extern crate diesel;
 /// # include!("../../doctest_setup.rs");
 /// # use diesel::dsl::*;
 /// #
 /// # fn main() {
 /// #     use schema::users::dsl::*;
-/// #     let connection = establish_connection();
+/// #     let connection = &mut establish_connection();
 /// #     connection.execute("INSERT INTO users (name) VALUES ('Jim')").unwrap();
 /// let tess = (2, "Tess".to_string());
 /// let data = users.filter(name.ne(all(vec!["Sean", "Jim"])));
-/// assert_eq!(Ok(vec![tess]), data.load(&connection));
+/// assert_eq!(Ok(vec![tess]), data.load(connection));
 /// # }
 /// ```
 pub fn all<ST, T>(vals: T) -> All<T::Expression>
@@ -64,7 +61,7 @@ where
 }
 
 #[doc(hidden)]
-#[derive(Debug, Copy, Clone, QueryId, NonAggregate)]
+#[derive(Debug, Copy, Clone, QueryId, ValidGrouping)]
 pub struct Any<Expr> {
     expr: Expr,
 }
@@ -78,6 +75,7 @@ impl<Expr> Any<Expr> {
 impl<Expr, ST> Expression for Any<Expr>
 where
     Expr: Expression<SqlType = Array<ST>>,
+    ST: SqlType + TypedExpressionType,
 {
     type SqlType = ST;
 }
@@ -97,7 +95,7 @@ where
 impl_selectable_expression!(Any<Expr>);
 
 #[doc(hidden)]
-#[derive(Debug, Copy, Clone, QueryId, NonAggregate)]
+#[derive(Debug, Copy, Clone, QueryId, ValidGrouping)]
 pub struct All<Expr> {
     expr: Expr,
 }
@@ -111,6 +109,7 @@ impl<Expr> All<Expr> {
 impl<Expr, ST> Expression for All<Expr>
 where
     Expr: Expression<SqlType = Array<ST>>,
+    ST: SqlType + TypedExpressionType,
 {
     type SqlType = ST;
 }
@@ -142,12 +141,12 @@ where
     type Expression = <T as AsExpression<Array<ST>>>::Expression;
 
     fn as_expression(self) -> Self::Expression {
-        AsExpression::as_expression(self)
+        <T as AsExpression<Array<ST>>>::as_expression(self)
     }
 }
 
-impl<ST, S, F, W, O, L, Of, G, FU> AsArrayExpression<ST>
-    for SelectStatement<S, F, W, O, L, Of, G, FU>
+impl<ST, F, S, D, W, O, LOf, G, H, LC> AsArrayExpression<ST>
+    for SelectStatement<F, S, D, W, O, LOf, G, H, LC>
 where
     Self: SelectQuery<SqlType = ST>,
 {
@@ -158,7 +157,7 @@ where
     }
 }
 
-impl<'a, ST, QS, DB> AsArrayExpression<ST> for BoxedSelectStatement<'a, ST, QS, DB>
+impl<'a, ST, QS, DB, GB> AsArrayExpression<ST> for BoxedSelectStatement<'a, ST, QS, DB, GB>
 where
     Self: SelectQuery<SqlType = ST>,
 {

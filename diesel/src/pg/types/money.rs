@@ -3,7 +3,8 @@
 use std::io::prelude::*;
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
-use crate::deserialize::{self, FromSql};
+use crate::deserialize::{self, FromSql, FromSqlRow};
+use crate::expression::AsExpression;
 use crate::pg::{Pg, PgValue};
 use crate::serialize::{self, Output, ToSql};
 use crate::sql_types::{BigInt, Money};
@@ -19,12 +20,12 @@ use crate::sql_types::{BigInt, Money};
 /// use diesel::data_types::PgMoney as Pence; // 1/100th unit of Pound
 /// use diesel::data_types::PgMoney as Fils;  // 1/1000th unit of Dinar
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromSqlRow, AsExpression)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, AsExpression, FromSqlRow)]
 #[sql_type = "Money"]
 pub struct PgMoney(pub i64);
 
 impl FromSql<Money, Pg> for PgMoney {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: PgValue<'_>) -> deserialize::Result<Self> {
         FromSql::<BigInt, Pg>::from_sql(bytes).map(PgMoney)
     }
 }

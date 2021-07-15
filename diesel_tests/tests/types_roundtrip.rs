@@ -9,51 +9,48 @@ pub use crate::schema::{connection_without_transaction, TestConnection};
 pub use diesel::data_types::*;
 pub use diesel::result::Error;
 pub use diesel::serialize::ToSql;
-pub use diesel::sql_types::HasSqlType;
+pub use diesel::sql_types::{HasSqlType, SingleValue, SqlType};
 pub use diesel::*;
 
-use diesel::expression::AsExpression;
+use deserialize::FromSqlRow;
+use diesel::expression::{AsExpression, NonAggregate, TypedExpressionType};
 use diesel::query_builder::{QueryFragment, QueryId};
 #[cfg(feature = "postgres")]
 use std::collections::Bound;
 
-thread_local! {
-    static CONN: TestConnection = connection_without_transaction();
-}
-
 pub fn test_type_round_trips<ST, T>(value: T) -> bool
 where
-    ST: QueryId,
+    ST: QueryId + SqlType + TypedExpressionType + SingleValue,
     <TestConnection as Connection>::Backend: HasSqlType<ST>,
     T: AsExpression<ST>
-        + Queryable<ST, <TestConnection as Connection>::Backend>
+        + FromSqlRow<ST, <TestConnection as Connection>::Backend>
         + PartialEq
         + Clone
         + ::std::fmt::Debug,
     <T as AsExpression<ST>>::Expression: SelectableExpression<(), SqlType = ST>
+        + NonAggregate
         + QueryFragment<<TestConnection as Connection>::Backend>
         + QueryId,
 {
-    CONN.with(|connection| {
-        let query = select(value.clone().into_sql::<ST>());
-        let result = query.get_result::<T>(connection);
-        match result {
-            Ok(res) => {
-                if value != res {
-                    println!("{:?}, {:?}", value, res);
-                    false
-                } else {
-                    true
-                }
-            }
-            Err(Error::DatabaseError(_, ref e))
-                if e.message() == "invalid byte sequence for encoding \"UTF8\": 0x00" =>
-            {
+    let connection = &mut connection_without_transaction();
+    let query = select(value.clone().into_sql::<ST>());
+    let result = query.get_result::<T>(connection);
+    match result {
+        Ok(res) => {
+            if value != res {
+                println!("{:?}, {:?}", value, res);
+                false
+            } else {
                 true
             }
-            Err(e) => panic!("Query failed: {:?}", e),
         }
-    })
+        Err(Error::DatabaseError(_, ref e))
+            if e.message() == "invalid byte sequence for encoding \"UTF8\": 0x00" =>
+        {
+            true
+        }
+        Err(e) => panic!("Query failed: {:?}", e),
+    }
 }
 
 pub fn id<A>(a: A) -> A {
@@ -203,6 +200,9 @@ mod pg_types {
         mk_tstz_bounds
     );
 
+    test_round_trip!(json_roundtrips, Json, SerdeWrapper, mk_serde_json);
+    test_round_trip!(jsonb_roundtrips, Jsonb, SerdeWrapper, mk_serde_json);
+
     fn mk_uuid(data: (u32, u16, u16, (u8, u8, u8, u8, u8, u8, u8, u8))) -> self::uuid::Uuid {
         let a = data.3;
         let b = [a.0, a.1, a.2, a.3, a.4, a.5, a.6, a.7];
@@ -278,7 +278,7 @@ mod mysql_types {
         naive_datetime_roundtrips,
         Timestamp,
         (i64, u32),
-        mk_naive_datetime
+        mk_naive_timestamp
     );
     test_round_trip!(
         naive_datetime_roundtrips_to_datetime,
@@ -292,6 +292,28 @@ mod mysql_types {
     test_round_trip!(u16_roundtrips, Unsigned<SmallInt>, u16);
     test_round_trip!(u32_roundtrips, Unsigned<Integer>, u32);
     test_round_trip!(u64_roundtrips, Unsigned<BigInt>, u64);
+    test_round_trip!(json_roundtrips, Json, SerdeWrapper, mk_serde_json);
+}
+
+#[cfg(feature = "mysql")]
+pub fn mk_naive_timestamp(data: (i64, u32)) -> NaiveDateTime {
+    let earliest_mysql_date = NaiveDate::from_ymd(1970, 1, 1).and_hms(0, 0, 1);
+    let latest_mysql_date = NaiveDate::from_ymd(2038, 1, 19).and_hms(03, 14, 7);
+    let mut r = mk_naive_datetime(data);
+
+    loop {
+        if r < earliest_mysql_date {
+            let diff = earliest_mysql_date - r;
+            r = earliest_mysql_date + diff;
+        } else if r > latest_mysql_date {
+            let diff = r - latest_mysql_date;
+            r = earliest_mysql_date + diff;
+        } else {
+            break;
+        }
+    }
+
+    r
 }
 
 pub fn mk_naive_datetime(data: (i64, u32)) -> NaiveDateTime {
@@ -341,6 +363,60 @@ pub fn mk_naive_date(days: u32) -> NaiveDate {
         .signed_duration_since(earliest_sqlite_date)
         .num_days();
     earliest_sqlite_date + Duration::days(days as i64 % num_days_representable)
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+#[derive(Clone, Debug)]
+struct SerdeWrapper(serde_json::Value);
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+impl quickcheck::Arbitrary for SerdeWrapper {
+    fn arbitrary<G: quickcheck::Gen>(g: &mut G) -> Self {
+        SerdeWrapper(arbitrary_serde(g, 0))
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn arbitrary_serde<G: quickcheck::Gen>(g: &mut G, depth: usize) -> serde_json::Value {
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
+    match g.gen_range(0, if depth > 0 { 4 } else { 6 }) {
+        0 => serde_json::Value::Null,
+        1 => serde_json::Value::Bool(g.gen()),
+        2 => {
+            // don't use floats here
+            // comparing floats is complicated
+            let n: i32 = g.gen();
+            serde_json::Value::Number(n.into())
+        }
+        3 => {
+            let len = g.gen_range(0, 15);
+            let s: String = g.sample_iter(Alphanumeric).take(len).collect();
+            serde_json::Value::String(s)
+        }
+        4 => {
+            let len = g.gen_range(0, 15);
+            let values = (0..len).map(|_| arbitrary_serde(g, depth + 1)).collect();
+            serde_json::Value::Array(values)
+        }
+        5 => {
+            let fields = g.gen_range(1, 5);
+            let map = (0..fields)
+                .map(|_| {
+                    let len = g.gen_range(0, 5);
+                    let name = g.sample_iter(Alphanumeric).take(len).collect();
+                    (name, arbitrary_serde(g, depth + 1))
+                })
+                .collect();
+            serde_json::Value::Object(map)
+        }
+        _ => unimplemented!(),
+    }
+}
+
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+fn mk_serde_json(data: SerdeWrapper) -> serde_json::Value {
+    data.0
 }
 
 #[cfg(feature = "postgres")]

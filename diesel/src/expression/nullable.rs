@@ -1,11 +1,12 @@
 use crate::backend::Backend;
+use crate::expression::TypedExpressionType;
 use crate::expression::*;
 use crate::query_builder::*;
 use crate::query_source::joins::ToInnerJoin;
 use crate::result::QueryResult;
-use crate::sql_types::IntoNullable;
+use crate::sql_types::{DieselNumericOps, IntoNullable};
 
-#[derive(Debug, Copy, Clone, DieselNumericOps, NonAggregate)]
+#[derive(Debug, Copy, Clone, DieselNumericOps, ValidGrouping)]
 pub struct Nullable<T>(T);
 
 impl<T> Nullable<T> {
@@ -17,9 +18,10 @@ impl<T> Nullable<T> {
 impl<T> Expression for Nullable<T>
 where
     T: Expression,
-    <T as Expression>::SqlType: IntoNullable,
+    T::SqlType: IntoNullable,
+    <T::SqlType as IntoNullable>::Nullable: TypedExpressionType,
 {
-    type SqlType = <<T as Expression>::SqlType as IntoNullable>::Nullable;
+    type SqlType = <T::SqlType as IntoNullable>::Nullable;
 }
 
 impl<T, DB> QueryFragment<DB> for Nullable<T>
@@ -32,8 +34,6 @@ where
     }
 }
 
-/// Nullable can be used in where clauses everywhere, but can only be used in
-/// select clauses for outer joins.
 impl<T, QS> AppearsOnTable<QS> for Nullable<T>
 where
     T: AppearsOnTable<QS>,
@@ -47,6 +47,19 @@ impl<T: QueryId> QueryId for Nullable<T> {
     const HAS_STATIC_QUERY_ID: bool = T::HAS_STATIC_QUERY_ID;
 }
 
+impl<T, DB> Selectable<DB> for Option<T>
+where
+    DB: Backend,
+    T: Selectable<DB>,
+    Nullable<T::SelectExpression>: Expression,
+{
+    type SelectExpression = Nullable<T::SelectExpression>;
+
+    fn construct_selection() -> Self::SelectExpression {
+        Nullable::new(T::construct_selection())
+    }
+}
+
 impl<T, QS> SelectableExpression<QS> for Nullable<T>
 where
     Self: AppearsOnTable<QS>,
@@ -54,3 +67,5 @@ where
     T: SelectableExpression<QS::InnerJoin>,
 {
 }
+
+impl<T> SelectableExpression<()> for Nullable<T> where Self: AppearsOnTable<()> {}

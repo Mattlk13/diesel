@@ -2,16 +2,17 @@ use crate::backend::Backend;
 use crate::expression::subselect::Subselect;
 use crate::expression::*;
 use crate::query_builder::*;
+use crate::query_builder::{BoxedSelectStatement, SelectStatement};
 use crate::result::QueryResult;
 use crate::sql_types::Bool;
 
-#[derive(Debug, Copy, Clone, QueryId, NonAggregate)]
+#[derive(Debug, Copy, Clone, QueryId, ValidGrouping)]
 pub struct In<T, U> {
     left: T,
     values: U,
 }
 
-#[derive(Debug, Copy, Clone, QueryId, NonAggregate)]
+#[derive(Debug, Copy, Clone, QueryId, ValidGrouping)]
 pub struct NotIn<T, U> {
     left: T,
     values: U,
@@ -92,9 +93,7 @@ where
 impl_selectable_expression!(In<T, U>);
 impl_selectable_expression!(NotIn<T, U>);
 
-use crate::query_builder::{BoxedSelectStatement, SelectStatement};
-
-pub trait AsInExpression<T> {
+pub trait AsInExpression<T: SqlType + TypedExpressionType> {
     type InExpression: MaybeEmpty + Expression<SqlType = T>;
 
     fn as_in_expression(self) -> Self::InExpression;
@@ -104,11 +103,15 @@ impl<I, T, ST> AsInExpression<ST> for I
 where
     I: IntoIterator<Item = T>,
     T: AsExpression<ST>,
+    ST: SqlType + TypedExpressionType,
 {
     type InExpression = Many<T::Expression>;
 
     fn as_in_expression(self) -> Self::InExpression {
-        let expressions = self.into_iter().map(AsExpression::as_expression).collect();
+        let expressions = self
+            .into_iter()
+            .map(<T as AsExpression<ST>>::as_expression)
+            .collect();
         Many(expressions)
     }
 }
@@ -117,8 +120,10 @@ pub trait MaybeEmpty {
     fn is_empty(&self) -> bool;
 }
 
-impl<ST, S, F, W, O, L, Of, G, LC> AsInExpression<ST> for SelectStatement<S, F, W, O, L, Of, G, LC>
+impl<ST, F, S, D, W, O, LOf, G, H, LC> AsInExpression<ST>
+    for SelectStatement<F, S, D, W, O, LOf, G, H, LC>
 where
+    ST: SqlType + TypedExpressionType,
     Subselect<Self, ST>: Expression<SqlType = ST>,
     Self: SelectQuery<SqlType = ST>,
 {
@@ -129,9 +134,10 @@ where
     }
 }
 
-impl<'a, ST, QS, DB> AsInExpression<ST> for BoxedSelectStatement<'a, ST, QS, DB>
+impl<'a, ST, QS, DB, GB> AsInExpression<ST> for BoxedSelectStatement<'a, ST, QS, DB, GB>
 where
-    Subselect<BoxedSelectStatement<'a, ST, QS, DB>, ST>: Expression<SqlType = ST>,
+    ST: SqlType + TypedExpressionType,
+    Subselect<BoxedSelectStatement<'a, ST, QS, DB, GB>, ST>: Expression<SqlType = ST>,
 {
     type InExpression = Subselect<Self, ST>;
 
@@ -140,7 +146,7 @@ where
     }
 }
 
-#[derive(Debug, Clone, NonAggregate)]
+#[derive(Debug, Clone, ValidGrouping)]
 pub struct Many<T>(Vec<T>);
 
 impl<T: Expression> Expression for Many<T> {

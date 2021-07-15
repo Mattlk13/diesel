@@ -21,30 +21,23 @@ pub fn derive(mut item: syn::DeriveInput) -> Result<TokenStream, Diagnostic> {
             .push(parse_quote!(__DB: diesel::backend::Backend));
         where_clause
             .predicates
+            .push(parse_quote!(__ST: diesel::sql_types::SingleValue));
+        where_clause
+            .predicates
             .push(parse_quote!(Self: FromSql<__ST, __DB>));
     }
     let (impl_generics, _, where_clause) = item.generics.split_for_impl();
 
     Ok(wrap_in_dummy_mod(quote! {
-        use diesel::deserialize::{self, FromSql, FromSqlRow, Queryable};
-
-        impl #impl_generics FromSqlRow<__ST, __DB> for #struct_ty
-        #where_clause
-        {
-            fn build_from_row<R: diesel::row::Row<__DB>>(row: &mut R)
-                -> deserialize::Result<Self>
-            {
-                FromSql::<__ST, __DB>::from_sql(row.take())
-            }
-        }
+        use diesel::deserialize::{self, FromSql, Queryable};
 
         impl #impl_generics Queryable<__ST, __DB> for #struct_ty
         #where_clause
         {
             type Row = Self;
 
-            fn build(row: Self::Row) -> Self {
-                row
+            fn build(row: Self::Row) -> deserialize::Result<Self> {
+                Ok(row)
             }
         }
     }))

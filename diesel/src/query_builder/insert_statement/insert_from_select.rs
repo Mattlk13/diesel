@@ -7,8 +7,8 @@ use crate::query_source::Table;
 /// Represents `(Columns) SELECT FROM ...` for use in an `INSERT` statement
 #[derive(Debug, Clone, Copy)]
 pub struct InsertFromSelect<Select, Columns> {
-    query: Select,
-    columns: Columns,
+    pub(in crate::query_builder) query: Select,
+    pub(in crate::query_builder) columns: Columns,
 }
 
 impl<Select, Columns> InsertFromSelect<Select, Columns> {
@@ -46,8 +46,8 @@ where
 impl<DB, Select, Columns> QueryFragment<DB> for InsertFromSelect<Select, Columns>
 where
     DB: Backend,
-    Columns: ColumnList + Expression<SqlType = Select::SqlType>,
-    Select: Query + QueryFragment<DB>,
+    Columns: ColumnList + Expression,
+    Select: Query<SqlType = Columns::SqlType> + QueryFragment<DB>,
 {
     fn walk_ast(&self, mut out: AstPass<DB>) -> QueryResult<()> {
         out.push_sql("(");
@@ -60,7 +60,7 @@ where
 
 impl<Select, Columns> UndecoratedInsertRecord<Columns::Table> for InsertFromSelect<Select, Columns>
 where
-    Columns: ColumnList + Expression<SqlType = Select::SqlType>,
-    Select: Query,
+    Columns: ColumnList + Expression,
+    Select: Query<SqlType = Columns::SqlType>,
 {
 }

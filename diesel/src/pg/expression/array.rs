@@ -1,8 +1,8 @@
 use crate::backend::Backend;
 use crate::expression::{
-    AppearsOnTable, AsExpressionList, Expression, NonAggregate, SelectableExpression,
+    AppearsOnTable, AsExpressionList, Expression, SelectableExpression, ValidGrouping,
 };
-use crate::query_builder::{AstPass, QueryFragment};
+use crate::query_builder::{AstPass, QueryFragment, QueryId};
 use crate::sql_types;
 use std::marker::PhantomData;
 
@@ -21,7 +21,6 @@ pub struct ArrayLiteral<T, ST> {
 /// # Examples
 ///
 /// ```rust
-/// # #[macro_use] extern crate diesel;
 /// # include!("../../doctest_setup.rs");
 /// #
 /// # fn main() {
@@ -32,13 +31,13 @@ pub struct ArrayLiteral<T, ST> {
 /// #     use schema::users::dsl::*;
 /// #     use diesel::dsl::array;
 /// #     use diesel::sql_types::Integer;
-/// #     let connection = establish_connection();
+/// #     let connection = &mut establish_connection();
 /// let ints = diesel::select(array::<Integer, _>((1, 2)))
-///     .get_result::<Vec<i32>>(&connection)?;
+///     .get_result::<Vec<i32>>(connection)?;
 /// assert_eq!(vec![1, 2], ints);
 ///
 /// let ids = users.select(array((id, id * 2)))
-///     .get_results::<Vec<i32>>(&connection)?;
+///     .get_results::<Vec<i32>>(connection)?;
 /// let expected = vec![
 ///     vec![1, 2],
 ///     vec![2, 4],
@@ -91,9 +90,9 @@ where
 {
 }
 
-impl<T, ST> NonAggregate for ArrayLiteral<T, ST>
+impl<T, ST, GB> ValidGrouping<GB> for ArrayLiteral<T, ST>
 where
-    T: NonAggregate,
-    ArrayLiteral<T, ST>: Expression,
+    T: ValidGrouping<GB>,
 {
+    type IsAggregate = T::IsAggregate;
 }

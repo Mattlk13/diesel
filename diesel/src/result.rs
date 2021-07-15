@@ -11,6 +11,7 @@ use std::fmt::{self, Display};
 ///
 /// This type is not intended to be exhaustively matched, and new variants may
 /// be added in the future without a major version bump.
+#[non_exhaustive]
 pub enum Error {
     /// The query contained a nul byte.
     ///
@@ -34,10 +35,10 @@ pub enum Error {
     /// does not treat 0 rows as an error. If you would like to allow either 0
     /// or 1 rows, call [`optional`] on the result.
     ///
-    /// [`get_result`]: ../query_dsl/trait.RunQueryDsl.html#method.get_result
-    /// [`first`]: ../query_dsl/trait.RunQueryDsl.html#method.first
-    /// [`load`]: ../query_dsl/trait.RunQueryDsl.html#method.load
-    /// [`optional`]: trait.OptionalExtension.html#tymethod.optional
+    /// [`get_result`]: crate::query_dsl::RunQueryDsl::get_result()
+    /// [`first`]: crate::query_dsl::RunQueryDsl::first()
+    /// [`load`]: crate::query_dsl::RunQueryDsl::load()
+    /// [`optional`]: OptionalExtension::optional
     NotFound,
 
     /// The query could not be constructed
@@ -61,6 +62,12 @@ pub enum Error {
     /// by PostgreSQL.
     SerializationError(Box<dyn StdError + Send + Sync>),
 
+    /// An error occurred during the rollback of a transaction.
+    ///
+    /// An example of when this error would be returned is if a rollback has
+    /// already be called on the current transaction.
+    RollbackError(Box<Error>),
+
     /// Roll back the current transaction.
     ///
     /// You can return this variant inside of a transaction when you want to
@@ -72,9 +79,6 @@ pub enum Error {
     /// Attempted to perform an operation that cannot be done inside a transaction
     /// when a transaction was already open.
     AlreadyInTransaction,
-
-    #[doc(hidden)]
-    __Nonexhaustive,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +88,7 @@ pub enum Error {
 /// identify errors which are commonly recovered from programmatically. This enum
 /// is not intended to be exhaustively matched, and new variants may be added in
 /// the future without a major version bump.
+#[non_exhaustive]
 pub enum DatabaseErrorKind {
     /// A unique constraint was violated.
     UniqueViolation,
@@ -113,8 +118,14 @@ pub enum DatabaseErrorKind {
     /// to lock the rows.
     ReadOnlyTransaction,
 
+    /// A not null constraint was violated.
+    NotNullViolation,
+
+    /// A check constraint was violated.
+    CheckViolation,
+
     #[doc(hidden)]
-    __Unknown, // Match against _ instead, more variants may be added in the future
+    Unknown, // Match against _ instead, more variants may be added in the future
 }
 
 /// Information about an error that was returned by the database.
@@ -152,6 +163,10 @@ pub trait DatabaseErrorInformation {
     /// Currently this method will return `None` for all backends other than
     /// PostgreSQL.
     fn constraint_name(&self) -> Option<&str>;
+
+    /// An optional integer indicating an error cursor position as an index into
+    /// the original statement string.
+    fn statement_position(&self) -> Option<i32>;
 }
 
 impl fmt::Debug for dyn DatabaseErrorInformation + Send + Sync {
@@ -164,7 +179,6 @@ impl DatabaseErrorInformation for String {
     fn message(&self) -> &str {
         self
     }
-
     fn details(&self) -> Option<&str> {
         None
     }
@@ -180,12 +194,16 @@ impl DatabaseErrorInformation for String {
     fn constraint_name(&self) -> Option<&str> {
         None
     }
+    fn statement_position(&self) -> Option<i32> {
+        None
+    }
 }
 
 /// Errors which can occur during [`Connection::establish`]
 ///
-/// [`Connection::establish`]: ../connection/trait.Connection.html#tymethod.establish
+/// [`Connection::establish`]: crate::connection::Connection::establish
 #[derive(Debug, PartialEq)]
+#[non_exhaustive]
 pub enum ConnectionError {
     /// The connection URL contained a `NUL` byte.
     InvalidCString(NulError),
@@ -200,8 +218,6 @@ pub enum ConnectionError {
     /// This variant is returned if an error occurred executing the query to set
     /// those options. Diesel will never affect global configuration.
     CouldntSetupConfiguration(Error),
-    #[doc(hidden)]
-    __Nonexhaustive, // Match against _ instead, more variants may be added in the future
 }
 
 /// A specialized result type for queries.
@@ -217,7 +233,7 @@ pub type QueryResult<T> = Result<T, Error>;
 /// is otherwise a direct mapping to `Result`.
 pub type ConnectionResult<T> = Result<T, ConnectionError>;
 
-/// See the [method documentation](#tymethod.optional).
+/// See the [method documentation](OptionalExtension::optional).
 pub trait OptionalExtension<T> {
     /// Converts a `QueryResult<T>` into a `QueryResult<Option<T>>`.
     ///
@@ -225,8 +241,8 @@ pub trait OptionalExtension<T> {
     /// row as an error (e.g. the return value of [`get_result`] or [`first`]). This method will
     /// handle that error, and give you back an `Option<T>` instead.
     ///
-    /// [`get_result`]: ../query_dsl/trait.RunQueryDsl.html#method.get_result
-    /// [`first`]: ../query_dsl/trait.RunQueryDsl.html#method.first
+    /// [`get_result`]: crate::query_dsl::RunQueryDsl::get_result()
+    /// [`first`]: crate::query_dsl::RunQueryDsl::first()
     ///
     /// # Example
     ///
@@ -273,12 +289,12 @@ impl Display for Error {
             Error::QueryBuilderError(ref e) => e.fmt(f),
             Error::DeserializationError(ref e) => e.fmt(f),
             Error::SerializationError(ref e) => e.fmt(f),
+            Error::RollbackError(ref e) => e.fmt(f),
             Error::RollbackTransaction => write!(f, "The current transaction was aborted"),
             Error::AlreadyInTransaction => write!(
                 f,
                 "Cannot perform this operation while a transaction is open",
             ),
-            Error::__Nonexhaustive => unreachable!(),
         }
     }
 }
@@ -302,7 +318,6 @@ impl Display for ConnectionError {
             ConnectionError::BadConnection(ref s) => write!(f, "{}", s),
             ConnectionError::InvalidConnectionUrl(ref s) => write!(f, "{}", s),
             ConnectionError::CouldntSetupConfiguration(ref e) => e.fmt(f),
-            ConnectionError::__Nonexhaustive => unreachable!(),
         }
     }
 }
@@ -354,3 +369,15 @@ impl fmt::Display for UnexpectedNullError {
 }
 
 impl StdError for UnexpectedNullError {}
+
+/// Expected more fields then present in the current row while deserialising results
+#[derive(Debug, Clone, Copy)]
+pub struct UnexpectedEndOfRow;
+
+impl fmt::Display for UnexpectedEndOfRow {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Unexpected end of row")
+    }
+}
+
+impl StdError for UnexpectedEndOfRow {}

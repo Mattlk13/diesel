@@ -1,17 +1,16 @@
-use crate::expression::Expression;
+use crate::expression::{Expression, ValidGrouping};
 use crate::pg::Pg;
 use crate::query_builder::*;
 use crate::result::QueryResult;
-use crate::sql_types::{Date, NotNull, Nullable, Timestamp, Timestamptz, VarChar};
+use crate::sql_types::{is_nullable, Date, Nullable, SqlType, Timestamp, Timestamptz, VarChar};
 
 /// Marker trait for types which are valid in `AT TIME ZONE` expressions
 pub trait DateTimeLike {}
 impl DateTimeLike for Date {}
 impl DateTimeLike for Timestamp {}
 impl DateTimeLike for Timestamptz {}
-impl<T: NotNull + DateTimeLike> DateTimeLike for Nullable<T> {}
-
-#[derive(Debug, Copy, Clone, QueryId, NonAggregate)]
+impl<T> DateTimeLike for Nullable<T> where T: SqlType<IsNull = is_nullable::NotNull> + DateTimeLike {}
+#[derive(Debug, Copy, Clone, QueryId, ValidGrouping)]
 pub struct AtTimeZone<Ts, Tz> {
     timestamp: Ts,
     timezone: Tz,

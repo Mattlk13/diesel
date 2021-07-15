@@ -11,6 +11,7 @@ use std::marker::PhantomData;
 
 use super::returning_clause::*;
 use crate::backend::Backend;
+use crate::expression::grouped::Grouped;
 use crate::expression::operators::Eq;
 use crate::expression::{Expression, NonAggregate, SelectableExpression};
 use crate::insertable::*;
@@ -23,16 +24,18 @@ use crate::query_dsl::RunQueryDsl;
 use crate::query_source::{Column, Table};
 use crate::result::QueryResult;
 #[cfg(feature = "sqlite")]
-use crate::sqlite::{Sqlite, SqliteConnection};
+use crate::sqlite::Sqlite;
+#[cfg(feature = "sqlite")]
+use crate::Connection;
 
 /// The structure returned by [`insert_into`].
 ///
 /// The provided methods [`values`] and [`default_values`] will insert
 /// data into the targeted table.
 ///
-/// [`insert_into`]: ../fn.insert_into.html
-/// [`values`]: #method.values
-/// [`default_values`]: #method.default_values
+/// [`insert_into`]: crate::insert_into()
+/// [`values`]: IncompleteInsertStatement::values()
+/// [`default_values`]: IncompleteInsertStatement::default_values()
 #[derive(Debug, Clone, Copy)]
 #[must_use = "Queries are only executed when calling `load`, `get_result` or similar."]
 pub struct IncompleteInsertStatement<T, Op> {
@@ -48,7 +51,6 @@ impl<T, Op> IncompleteInsertStatement<T, Op> {
     /// Inserts `DEFAULT VALUES` into the targeted table.
     ///
     /// ```rust
-    /// # #[macro_use] extern crate diesel;
     /// # include!("../../doctest_setup.rs");
     /// #
     /// # table! {
@@ -65,7 +67,7 @@ impl<T, Op> IncompleteInsertStatement<T, Op> {
     /// # fn run_test() -> QueryResult<()> {
     /// #     use diesel::insert_into;
     /// #     use self::users::dsl::*;
-    /// #     let connection = connection_no_data();
+    /// #     let connection = &mut connection_no_data();
     /// connection.execute("CREATE TABLE users (
     ///     name VARCHAR(255) NOT NULL DEFAULT 'Sean',
     ///     hair_color VARCHAR(255) NOT NULL DEFAULT 'Green'
@@ -73,9 +75,9 @@ impl<T, Op> IncompleteInsertStatement<T, Op> {
     ///
     /// insert_into(users)
     ///     .default_values()
-    ///     .execute(&connection)
+    ///     .execute(connection)
     ///     .unwrap();
-    /// let inserted_user = users.first(&connection)?;
+    /// let inserted_user = users.first(connection)?;
     /// let expected_data = (String::from("Sean"), String::from("Green"));
     ///
     /// assert_eq!(expected_data, inserted_user);
@@ -97,7 +99,7 @@ impl<T, Op> IncompleteInsertStatement<T, Op> {
     /// "overflow evaluating requirement" as a result of calling this method,
     /// you may need an `&` in front of the argument to this method.
     ///
-    /// [`insert_into`]: ../fn.insert_into.html
+    /// [`insert_into`]: crate::insert_into()
     pub fn values<U>(self, records: U) -> InsertStatement<T, U::Values, Op>
     where
         U: Insertable<T>,
@@ -142,7 +144,6 @@ impl<T, U, Op, Ret> InsertStatement<T, U, Op, Ret> {
         }
     }
 
-    #[cfg(feature = "postgres")]
     pub(crate) fn replace_values<F, V>(self, f: F) -> InsertStatement<T, V, Op, Ret>
     where
         F: FnOnce(U) -> V,
@@ -156,14 +157,14 @@ impl<T, U, C, Op, Ret> InsertStatement<T, InsertFromSelect<U, C>, Op, Ret> {
     ///
     /// See the documentation for [`insert_into`] for usage examples.
     ///
-    /// [`insert_into`]: ../fn.insert_into.html
+    /// [`insert_into`]: crate::insert_into()
     pub fn into_columns<C2>(
         self,
         columns: C2,
     ) -> InsertStatement<T, InsertFromSelect<U, C2>, Op, Ret>
     where
-        C2: ColumnList<Table = T> + Expression<SqlType = U::SqlType>,
-        U: Query,
+        C2: ColumnList<Table = T> + Expression,
+        U: Query<SqlType = C2::SqlType>,
     {
         InsertStatement::new(
             self.target,
@@ -204,16 +205,16 @@ where
 }
 
 #[cfg(feature = "sqlite")]
-impl<'a, T, U, Op> ExecuteDsl<SqliteConnection> for InsertStatement<T, BatchInsert<'a, U, T>, Op>
+impl<'a, T, U, Op, C> ExecuteDsl<C, Sqlite> for InsertStatement<T, BatchInsert<'a, U, T>, Op>
 where
+    C: Connection<Backend = Sqlite>,
     &'a U: Insertable<T>,
     InsertStatement<T, <&'a U as Insertable<T>>::Values, Op>: QueryFragment<Sqlite>,
     T: Copy,
     Op: Copy,
 {
-    fn execute(query: Self, conn: &SqliteConnection) -> QueryResult<usize> {
-        use crate::connection::Connection;
-        conn.transaction(|| {
+    fn execute(query: Self, conn: &mut C) -> QueryResult<usize> {
+        conn.transaction(|conn| {
             let mut result = 0;
             for record in query.records.records {
                 result += InsertStatement::new(
@@ -286,16 +287,16 @@ where
 }
 
 #[cfg(feature = "sqlite")]
-impl<T, U, Op> ExecuteDsl<SqliteConnection>
+impl<T, U, Op, C> ExecuteDsl<C, Sqlite>
     for InsertStatement<T, OwnedBatchInsert<ValuesClause<U, T>, T>, Op>
 where
+    C: Connection<Backend = Sqlite>,
     InsertStatement<T, ValuesClause<U, T>, Op>: QueryFragment<Sqlite>,
     T: Copy,
     Op: Copy,
 {
-    fn execute(query: Self, conn: &SqliteConnection) -> QueryResult<usize> {
-        use crate::connection::Connection;
-        conn.transaction(|| {
+    fn execute(query: Self, conn: &mut C) -> QueryResult<usize> {
+        conn.transaction(|conn| {
             let mut result = 0;
             for value in query.records.values {
                 result +=
@@ -397,17 +398,16 @@ impl<T, U, Op> InsertStatement<T, U, Op> {
     /// ### Inserting records:
     ///
     /// ```rust
-    /// # #[macro_use] extern crate diesel;
     /// # include!("../../doctest_setup.rs");
     /// #
     /// # #[cfg(feature = "postgres")]
     /// # fn main() {
     /// #     use schema::users::dsl::*;
-    /// #     let connection = establish_connection();
+    /// #     let connection = &mut establish_connection();
     /// let inserted_names = diesel::insert_into(users)
     ///     .values(&vec![name.eq("Timmy"), name.eq("Jimmy")])
     ///     .returning(name)
-    ///     .get_results(&connection);
+    ///     .get_results(connection);
     /// assert_eq!(Ok(vec!["Timmy".to_string(), "Jimmy".to_string()]), inserted_names);
     /// # }
     /// # #[cfg(not(feature = "postgres"))]
@@ -509,6 +509,13 @@ impl<T, Table> UndecoratedInsertRecord<Table> for Vec<T> where [T]: UndecoratedI
 impl<Lhs, Rhs> UndecoratedInsertRecord<Lhs::Table> for Eq<Lhs, Rhs> where Lhs: Column {}
 
 impl<Lhs, Rhs, Tab> UndecoratedInsertRecord<Tab> for Option<Eq<Lhs, Rhs>> where
+    Eq<Lhs, Rhs>: UndecoratedInsertRecord<Tab>
+{
+}
+
+impl<Lhs, Rhs> UndecoratedInsertRecord<Lhs::Table> for Grouped<Eq<Lhs, Rhs>> where Lhs: Column {}
+
+impl<Lhs, Rhs, Tab> UndecoratedInsertRecord<Tab> for Option<Grouped<Eq<Lhs, Rhs>>> where
     Eq<Lhs, Rhs>: UndecoratedInsertRecord<Tab>
 {
 }

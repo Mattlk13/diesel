@@ -1,13 +1,13 @@
 use std::marker::PhantomData;
 
+use super::Query;
 use crate::backend::Backend;
 use crate::connection::Connection;
-use crate::deserialize::QueryableByName;
 use crate::query_builder::{AstPass, QueryFragment, QueryId};
-use crate::query_dsl::{LoadQuery, RunQueryDsl};
+use crate::query_dsl::RunQueryDsl;
 use crate::result::QueryResult;
 use crate::serialize::ToSql;
-use crate::sql_types::HasSqlType;
+use crate::sql_types::{HasSqlType, Untyped};
 
 #[derive(Debug, Clone)]
 #[must_use = "Queries are only executed when calling `load`, `get_result` or similar."]
@@ -17,7 +17,7 @@ use crate::sql_types::HasSqlType;
 /// rather than by index. This means that you cannot deserialize this query into
 /// a tuple, and any structs used must implement `QueryableByName`.
 ///
-/// See [`sql_query`](../fn.sql_query.html) for examples.
+/// See [`sql_query`](crate::sql_query()) for examples.
 pub struct SqlQuery<Inner = ()> {
     inner: Inner,
     query: String,
@@ -28,7 +28,11 @@ impl<Inner> SqlQuery<Inner> {
         SqlQuery { inner, query }
     }
 
-    /// Bind a value for use with this SQL query.
+    /// Bind a value for use with this SQL query. The given query should have
+    /// placeholders that vary based on the database type,
+    /// like [SQLite Parameter](https://sqlite.org/lang_expr.html#varparam) syntax,
+    /// [PostgreSQL PREPARE syntax](https://www.postgresql.org/docs/current/sql-prepare.html),
+    /// or [MySQL bind syntax](https://dev.mysql.com/doc/refman/8.0/en/mysql-stmt-bind-param.html).
     ///
     /// # Safety
     ///
@@ -39,7 +43,6 @@ impl<Inner> SqlQuery<Inner> {
     /// # Example
     ///
     /// ```
-    /// # #[macro_use] extern crate diesel;
     /// # include!("../doctest_setup.rs");
     /// #
     /// # use schema::users;
@@ -55,10 +58,10 @@ impl<Inner> SqlQuery<Inner> {
     /// #     use diesel::sql_query;
     /// #     use diesel::sql_types::{Integer, Text};
     /// #
-    /// #     let connection = establish_connection();
+    /// #     let connection = &mut establish_connection();
     /// #     diesel::insert_into(users::table)
     /// #         .values(users::name.eq("Jim"))
-    /// #         .execute(&connection).unwrap();
+    /// #         .execute(connection).unwrap();
     /// # #[cfg(feature = "postgres")]
     /// # let users = sql_query("SELECT * FROM users WHERE id > $1 AND name != $2");
     /// # #[cfg(not(feature = "postgres"))]
@@ -67,7 +70,7 @@ impl<Inner> SqlQuery<Inner> {
     /// # let users = users
     ///     .bind::<Integer, _>(1)
     ///     .bind::<Text, _>("Tess")
-    ///     .get_results(&connection);
+    ///     .get_results(connection);
     /// let expected_users = vec![
     ///     User { id: 3, name: "Jim".into() },
     /// ];
@@ -113,21 +116,16 @@ impl<Inner> QueryId for SqlQuery<Inner> {
     const HAS_STATIC_QUERY_ID: bool = false;
 }
 
-impl<Inner, Conn, T> LoadQuery<Conn, T> for SqlQuery<Inner>
-where
-    Conn: Connection,
-    T: QueryableByName<Conn::Backend>,
-    Self: QueryFragment<Conn::Backend>,
-{
-    fn internal_load(self, conn: &Conn) -> QueryResult<Vec<T>> {
-        conn.query_by_name(&self)
-    }
+impl<Inner> Query for SqlQuery<Inner> {
+    type SqlType = Untyped;
 }
 
 impl<Inner, Conn> RunQueryDsl<Conn> for SqlQuery<Inner> {}
 
 #[derive(Debug, Clone, Copy)]
 #[must_use = "Queries are only executed when calling `load`, `get_result` or similar."]
+/// Returned by the [`SqlQuery::bind()`] method when binding a value to a fragment of SQL.
+///
 pub struct UncheckedBind<Query, Value, ST> {
     query: Query,
     value: Value,
@@ -151,6 +149,65 @@ impl<Query, Value, ST> UncheckedBind<Query, Value, ST> {
         BoxedSqlQuery::new(self)
     }
 
+    /// Construct a full SQL query using raw SQL.
+    ///
+    /// This function exists for cases where a query needs to be written that is not
+    /// supported by the query builder. Unlike most queries in Diesel, `sql_query`
+    /// will deserialize its data by name, not by index. That means that you cannot
+    /// deserialize into a tuple, and structs which you deserialize from this
+    /// function will need to have `#[derive(QueryableByName)]`.
+    ///
+    /// This function is intended for use when you want to write the entire query
+    /// using raw SQL. If you only need a small bit of raw SQL in your query, use
+    /// [`sql`](dsl::sql()) instead.
+    ///
+    /// Query parameters can be bound into the raw query using [`SqlQuery::bind()`].
+    ///
+    /// # Safety
+    ///
+    /// The implementation of `QueryableByName` will assume that columns with a
+    /// given name will have a certain type. The compiler will be unable to verify
+    /// that the given type is correct. If your query returns a column of an
+    /// unexpected type, the result may have the wrong value, or return an error.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # include!("../doctest_setup.rs");
+    /// #
+    /// # use schema::users;
+    /// #
+    /// # #[derive(QueryableByName, Debug, PartialEq)]
+    /// # #[table_name="users"]
+    /// # struct User {
+    /// #     id: i32,
+    /// #     name: String,
+    /// # }
+    /// #
+    /// # fn main() {
+    /// #     use diesel::sql_query;
+    /// #     use diesel::sql_types::{Integer, Text};
+    /// #
+    /// #     let connection = &mut establish_connection();
+    /// #     diesel::insert_into(users::table)
+    /// #         .values(users::name.eq("Jim"))
+    /// #         .execute(connection).unwrap();
+    /// # #[cfg(feature = "postgres")]
+    /// # let users = sql_query("SELECT * FROM users WHERE id > $1 AND name != $2");
+    /// # #[cfg(not(feature = "postgres"))]
+    /// let users = sql_query("SELECT * FROM users WHERE id > ? AND name <> ?")
+    /// # ;
+    /// # let users = users
+    ///     .bind::<Integer, _>(1)
+    ///     .bind::<Text, _>("Tess")
+    ///     .get_results(connection);
+    /// let expected_users = vec![
+    ///     User { id: 3, name: "Jim".into() },
+    /// ];
+    /// assert_eq!(Ok(expected_users), users);
+    /// # }
+    /// ```
+    /// [`SqlQuery::bind()`]: query_builder::SqlQuery::bind()
     pub fn sql<T: Into<String>>(self, sql: T) -> SqlQuery<Self> {
         SqlQuery::new(self, sql.into())
     }
@@ -179,15 +236,8 @@ where
     }
 }
 
-impl<Conn, Query, Value, ST, T> LoadQuery<Conn, T> for UncheckedBind<Query, Value, ST>
-where
-    Conn: Connection,
-    T: QueryableByName<Conn::Backend>,
-    Self: QueryFragment<Conn::Backend> + QueryId,
-{
-    fn internal_load(self, conn: &Conn) -> QueryResult<Vec<T>> {
-        conn.query_by_name(&self)
-    }
+impl<Q, Value, ST> Query for UncheckedBind<Q, Value, ST> {
+    type SqlType = Untyped;
 }
 
 impl<Conn, Query, Value, ST> RunQueryDsl<Conn> for UncheckedBind<Query, Value, ST> {}
@@ -195,7 +245,7 @@ impl<Conn, Query, Value, ST> RunQueryDsl<Conn> for UncheckedBind<Query, Value, S
 #[must_use = "Queries are only executed when calling `load`, `get_result`, or similar."]
 /// See [`SqlQuery::into_boxed`].
 ///
-/// [`SqlQuery::into_boxed`]: ./struct.SqlQuery.html#method.into_boxed
+/// [`SqlQuery::into_boxed`]: SqlQuery::into_boxed()
 #[allow(missing_debug_implementations)]
 pub struct BoxedSqlQuery<'f, DB: Backend, Query> {
     query: Query,
@@ -214,7 +264,7 @@ impl<'f, DB: Backend, Query> BoxedSqlQuery<'f, DB, Query> {
 
     /// See [`SqlQuery::bind`].
     ///
-    /// [`SqlQuery::bind`]: ./struct.SqlQuery.html#method.bind
+    /// [`SqlQuery::bind`]: SqlQuery::bind()
     pub fn bind<BindSt, Value>(mut self, b: Value) -> Self
     where
         DB: HasSqlType<BindSt>,
@@ -227,7 +277,7 @@ impl<'f, DB: Backend, Query> BoxedSqlQuery<'f, DB, Query> {
 
     /// See [`SqlQuery::sql`].
     ///
-    /// [`SqlQuery::sql`]: ./struct.SqlQuery.html#method.sql
+    /// [`SqlQuery::sql`]: SqlQuery::sql()
     pub fn sql<T: AsRef<str>>(mut self, sql: T) -> Self {
         self.sql += sql.as_ref();
         self
@@ -257,15 +307,11 @@ impl<DB: Backend, Query> QueryId for BoxedSqlQuery<'_, DB, Query> {
     const HAS_STATIC_QUERY_ID: bool = false;
 }
 
-impl<Conn, T, Query> LoadQuery<Conn, T> for BoxedSqlQuery<'_, Conn::Backend, Query>
+impl<DB, Q> Query for BoxedSqlQuery<'_, DB, Q>
 where
-    Conn: Connection,
-    T: QueryableByName<Conn::Backend>,
-    Self: QueryFragment<Conn::Backend> + QueryId,
+    DB: Backend,
 {
-    fn internal_load(self, conn: &Conn) -> QueryResult<Vec<T>> {
-        conn.query_by_name(&self)
-    }
+    type SqlType = Untyped;
 }
 
 impl<Conn: Connection, Query> RunQueryDsl<Conn> for BoxedSqlQuery<'_, Conn::Backend, Query> {}

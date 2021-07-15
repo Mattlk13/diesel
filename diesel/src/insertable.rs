@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
 use crate::backend::{Backend, SupportsDefaultKeyword};
+use crate::expression::grouped::Grouped;
 use crate::expression::{AppearsOnTable, Expression};
 use crate::query_builder::{
     AstPass, InsertStatement, QueryFragment, UndecoratedInsertRecord, ValuesClause,
@@ -14,18 +15,7 @@ use crate::sqlite::Sqlite;
 /// database. This is automatically implemented for `&[T]` and `&Vec<T>` for
 /// inserting more than one record.
 ///
-/// ### Deriving
-///
-/// This trait can be automatically derived by adding  `#[derive(Insertable)]`
-/// to your struct. Structs which derive this trait must also be annotated
-/// with `#[table_name = "some_table_name"]`. If the field name of your
-/// struct differs from the name of the column, you can annotate the field
-/// with `#[column_name = "some_column_name"]`.
-///
-/// Your struct can also contain fields which implement `Insertable`. This is
-/// useful when you want to have one field map to more than one column (for
-/// example, an enum that maps to a label and a value column). Add
-/// `#[diesel(embed)]` to any such fields.
+/// This trait can be [derived](derive@Insertable)
 pub trait Insertable<T> {
     /// The `VALUES` clause to insert these records
     ///
@@ -50,7 +40,6 @@ pub trait Insertable<T> {
     /// # Example
     ///
     /// ```rust
-    /// # #[macro_use] extern crate diesel;
     /// # include!("doctest_setup.rs");
     /// #
     /// # fn main() {
@@ -59,8 +48,8 @@ pub trait Insertable<T> {
     /// #
     /// # fn run_test() -> QueryResult<()> {
     /// #     use schema::{posts, users};
-    /// #     let conn = establish_connection();
-    /// #     diesel::delete(posts::table).execute(&conn)?;
+    /// #     let conn = &mut establish_connection();
+    /// #     diesel::delete(posts::table).execute(conn)?;
     /// users::table
     ///     .select((
     ///         users::name.concat("'s First Post"),
@@ -68,11 +57,11 @@ pub trait Insertable<T> {
     ///     ))
     ///     .insert_into(posts::table)
     ///     .into_columns((posts::title, posts::user_id))
-    ///     .execute(&conn)?;
+    ///     .execute(conn)?;
     ///
     /// let inserted_posts = posts::table
     ///     .select(posts::title)
-    ///     .load::<String>(&conn)?;
+    ///     .load::<String>(conn)?;
     /// let expected = vec!["Sean's First Post", "Tess's First Post"];
     /// assert_eq!(expected, inserted_posts);
     /// #     Ok(())
@@ -85,6 +74,9 @@ pub trait Insertable<T> {
         crate::insert_into(table).values(self)
     }
 }
+
+#[doc(inline)]
+pub use diesel_derives::Insertable;
 
 pub trait CanInsertInSingleQuery<DB: Backend> {
     /// How many rows will this query insert?
@@ -263,6 +255,28 @@ where
 
     fn values(self) -> Self::Values {
         self.as_ref().values()
+    }
+}
+
+impl<L, R, Tab> Insertable<Tab> for Grouped<crate::expression::operators::Eq<L, R>>
+where
+    crate::expression::operators::Eq<L, R>: Insertable<Tab>,
+{
+    type Values = <crate::expression::operators::Eq<L, R> as Insertable<Tab>>::Values;
+
+    fn values(self) -> Self::Values {
+        self.0.values()
+    }
+}
+
+impl<'a, L, R, Tab> Insertable<Tab> for &'a Grouped<crate::expression::operators::Eq<L, R>>
+where
+    &'a crate::expression::operators::Eq<L, R>: Insertable<Tab>,
+{
+    type Values = <&'a crate::expression::operators::Eq<L, R> as Insertable<Tab>>::Values;
+
+    fn values(self) -> Self::Values {
+        self.0.values()
     }
 }
 

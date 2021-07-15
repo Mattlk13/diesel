@@ -6,26 +6,30 @@ use crate::connection::Connection;
 use crate::dsl::Find;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::dsl::Update;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use crate::expression::{is_aggregate, MixedAggregates, ValidGrouping};
 use crate::query_builder::{AsChangeset, IntoUpdateTarget};
 #[cfg(any(feature = "sqlite", feature = "mysql"))]
 use crate::query_dsl::methods::{ExecuteDsl, FindDsl};
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 use crate::query_dsl::{LoadQuery, RunQueryDsl};
 use crate::result::QueryResult;
+#[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
+use crate::Table;
 
 /// A trait defining how to update a record and fetch the updated entry
 /// on a certain backend.
 ///
 /// The only case where it is required to work with this trait is while
 /// implementing a new connection type.
-/// Otherwise use [`SaveChangesDsl`](trait.SaveChangesDsl.html)
+/// Otherwise use [`SaveChangesDsl`]
 ///
 /// For implementing this trait for a custom backend:
 /// * The `Changes` generic parameter represents the changeset that should be stored
 /// * The `Output` generic parameter represents the type of the response.
 pub trait UpdateAndFetchResults<Changes, Output>: Connection {
     /// See the traits documentation.
-    fn update_and_fetch(&self, changeset: Changes) -> QueryResult<Output>;
+    fn update_and_fetch(&mut self, changeset: Changes) -> QueryResult<Output>;
 }
 
 #[cfg(feature = "postgres")]
@@ -36,8 +40,11 @@ impl<Changes, Output> UpdateAndFetchResults<Changes, Output> for PgConnection
 where
     Changes: Copy + AsChangeset<Target = <Changes as HasTable>::Table> + IntoUpdateTarget,
     Update<Changes, Changes>: LoadQuery<PgConnection, Output>,
+    <Changes::Table as Table>::AllColumns: ValidGrouping<()>,
+    <<Changes::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
+        MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
 {
-    fn update_and_fetch(&self, changeset: Changes) -> QueryResult<Output> {
+    fn update_and_fetch(&mut self, changeset: Changes) -> QueryResult<Output> {
         crate::update(changeset).set(changeset).get_result(self)
     }
 }
@@ -53,8 +60,11 @@ where
     Changes::Table: FindDsl<Changes::Id>,
     Update<Changes, Changes>: ExecuteDsl<SqliteConnection>,
     Find<Changes::Table, Changes::Id>: LoadQuery<SqliteConnection, Output>,
+    <Changes::Table as Table>::AllColumns: ValidGrouping<()>,
+    <<Changes::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
+        MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
 {
-    fn update_and_fetch(&self, changeset: Changes) -> QueryResult<Output> {
+    fn update_and_fetch(&mut self, changeset: Changes) -> QueryResult<Output> {
         crate::update(changeset).set(changeset).execute(self)?;
         Changes::table().find(changeset.id()).get_result(self)
     }
@@ -71,8 +81,11 @@ where
     Changes::Table: FindDsl<Changes::Id>,
     Update<Changes, Changes>: ExecuteDsl<MysqlConnection>,
     Find<Changes::Table, Changes::Id>: LoadQuery<MysqlConnection, Output>,
+    <Changes::Table as Table>::AllColumns: ValidGrouping<()>,
+    <<Changes::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
+        MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
 {
-    fn update_and_fetch(&self, changeset: Changes) -> QueryResult<Output> {
+    fn update_and_fetch(&mut self, changeset: Changes) -> QueryResult<Output> {
         crate::update(changeset).set(changeset).execute(self)?;
         Changes::table().find(changeset.id()).get_result(self)
     }
@@ -88,7 +101,6 @@ where
 /// # Example
 ///
 /// ```rust
-/// # #[macro_use] extern crate diesel;
 /// # include!("../doctest_setup.rs");
 /// # use schema::animals;
 /// #
@@ -113,9 +125,9 @@ where
 /// #
 /// # fn run_test() -> QueryResult<()> {
 /// #     use self::animals::dsl::*;
-/// #     let connection = establish_connection();
+/// #     let connection = &mut establish_connection();
 /// let form = AnimalForm { id: 2, name: "Super scary" };
-/// let changed_animal = form.save_changes(&connection)?;
+/// let changed_animal = form.save_changes(connection)?;
 /// let expected_animal = Animal {
 ///     id: 2,
 ///     species: String::from("spider"),
@@ -128,7 +140,7 @@ where
 /// ```
 pub trait SaveChangesDsl<Conn> {
     /// See the trait documentation.
-    fn save_changes<T>(self, connection: &Conn) -> QueryResult<T>
+    fn save_changes<T>(self, connection: &mut Conn) -> QueryResult<T>
     where
         Self: Sized,
         Conn: UpdateAndFetchResults<Self, T>,

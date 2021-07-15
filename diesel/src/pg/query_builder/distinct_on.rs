@@ -1,12 +1,25 @@
 use crate::expression::SelectableExpression;
 use crate::pg::Pg;
-use crate::query_builder::{AstPass, QueryFragment, SelectQuery, SelectStatement};
+use crate::query_builder::order_clause::{NoOrderClause, OrderClause};
+use crate::query_builder::{AstPass, QueryFragment, QueryId, SelectQuery, SelectStatement};
 use crate::query_dsl::methods::DistinctOnDsl;
+use crate::query_dsl::order_dsl::ValidOrderingForDistinct;
 use crate::result::QueryResult;
+use crate::sql_types::SingleValue;
+use crate::Expression;
 
 /// Represents `DISTINCT ON (...)`
 #[derive(Debug, Clone, Copy, QueryId)]
 pub struct DistinctOnClause<T>(pub(crate) T);
+
+impl<T> ValidOrderingForDistinct<DistinctOnClause<T>> for NoOrderClause {}
+impl<T> ValidOrderingForDistinct<DistinctOnClause<T>> for OrderClause<(T,)> {}
+impl<T> ValidOrderingForDistinct<DistinctOnClause<T>> for OrderClause<T>
+where
+    T: Expression,
+    T::SqlType: SingleValue,
+{
+}
 
 impl<T> QueryFragment<Pg> for DistinctOnClause<T>
 where
@@ -20,14 +33,16 @@ where
     }
 }
 
-impl<ST, F, S, D, W, O, L, Of, G, Selection> DistinctOnDsl<Selection>
-    for SelectStatement<F, S, D, W, O, L, Of, G>
+impl<ST, F, S, D, W, O, LOf, G, H, Selection> DistinctOnDsl<Selection>
+    for SelectStatement<F, S, D, W, O, LOf, G, H>
 where
     Selection: SelectableExpression<F>,
+    Selection::SqlType: SingleValue,
     Self: SelectQuery<SqlType = ST>,
-    SelectStatement<F, S, DistinctOnClause<Selection>, W, O, L, Of, G>: SelectQuery<SqlType = ST>,
+    O: ValidOrderingForDistinct<DistinctOnClause<Selection>>,
+    SelectStatement<F, S, DistinctOnClause<Selection>, W, O, LOf, G, H>: SelectQuery<SqlType = ST>,
 {
-    type Output = SelectStatement<F, S, DistinctOnClause<Selection>, W, O, L, Of, G>;
+    type Output = SelectStatement<F, S, DistinctOnClause<Selection>, W, O, LOf, G, H>;
 
     fn distinct_on(self, selection: Selection) -> Self::Output {
         SelectStatement::new(
@@ -36,9 +51,9 @@ where
             DistinctOnClause(selection),
             self.where_clause,
             self.order,
-            self.limit,
-            self.offset,
+            self.limit_offset,
             self.group_by,
+            self.having,
             self.locking,
         )
     }

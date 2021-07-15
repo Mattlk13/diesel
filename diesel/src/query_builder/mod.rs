@@ -11,24 +11,28 @@ mod clause_macro;
 
 mod ast_pass;
 pub mod bind_collector;
+pub(crate) mod combination_clause;
 mod debug_query;
 mod delete_statement;
 mod distinct_clause;
 #[doc(hidden)]
 pub mod functions;
 mod group_by_clause;
+mod having_clause;
 mod insert_statement;
-mod limit_clause;
+pub(crate) mod limit_clause;
+pub(crate) mod limit_offset_clause;
 pub(crate) mod locking_clause;
 #[doc(hidden)]
 pub mod nodes;
-mod offset_clause;
-mod order_clause;
+pub(crate) mod offset_clause;
+pub(crate) mod order_clause;
 mod returning_clause;
-mod select_clause;
+pub(crate) mod select_clause;
 mod select_statement;
 mod sql_query;
 mod update_statement;
+pub(crate) mod upsert;
 mod where_clause;
 
 pub use self::ast_pass::AstPass;
@@ -40,6 +44,10 @@ pub use self::insert_statement::{
     IncompleteInsertStatement, InsertStatement, UndecoratedInsertRecord, ValuesClause,
 };
 pub use self::query_id::QueryId;
+#[doc(inline)]
+pub use self::select_clause::{
+    IntoBoxedSelectClause, SelectClauseExpression, SelectClauseQueryFragment,
+};
 #[doc(hidden)]
 pub use self::select_statement::{BoxedSelectStatement, SelectStatement};
 pub use self::sql_query::{BoxedSqlQuery, SqlQuery};
@@ -47,6 +55,11 @@ pub use self::sql_query::{BoxedSqlQuery, SqlQuery};
 pub use self::update_statement::{
     AsChangeset, BoxedUpdateStatement, IntoUpdateTarget, UpdateStatement, UpdateTarget,
 };
+pub use self::upsert::on_conflict_target_decorations::DecoratableTarget;
+
+pub use self::limit_clause::{LimitClause, NoLimitClause};
+pub use self::limit_offset_clause::{BoxedLimitOffsetClause, LimitOffsetClause};
+pub use self::offset_clause::{NoOffsetClause, OffsetClause};
 
 pub(crate) use self::insert_statement::ColumnList;
 
@@ -67,7 +80,6 @@ pub type BuildQueryResult = Result<(), Box<dyn Error + Send + Sync>>;
 /// the query builder with new capabilities will interact with [`AstPass`]
 /// instead.
 ///
-/// [`AstPass`]: struct.AstPass.html
 pub trait QueryBuilder<DB: Backend> {
     /// Add `sql` to the end of the query being constructed.
     fn push_sql(&mut self, sql: &str);
@@ -79,6 +91,10 @@ pub trait QueryBuilder<DB: Backend> {
     /// Add a placeholder for a bind parameter to the end of the query being
     /// constructed.
     fn push_bind_param(&mut self);
+
+    /// Increases the internal counter for bind parameters without adding the
+    /// bind parameter itself to the query
+    fn push_bind_param_value_only(&mut self) {}
 
     /// Returns the constructed SQL query.
     fn finish(self) -> String;
@@ -94,7 +110,7 @@ pub trait QueryBuilder<DB: Backend> {
 /// query. For example, an `INSERT` statement without a `RETURNING` clause will
 /// not implement this trait, but can still be executed.
 ///
-/// [`Expression`]: ../expression/trait.Expression.html
+/// [`Expression`]: crate::expression::Expression
 pub trait Query {
     /// The SQL type that this query represents.
     ///
@@ -128,8 +144,8 @@ pub trait SelectQuery {
 /// represent a `WHERE` clause). Implementations of [`ExecuteDsl`] and
 /// [`LoadQuery`] will generally require that this trait be implemented.
 ///
-/// [`ExecuteDsl`]: ../query_dsl/methods/trait.ExecuteDsl.html
-/// [`LoadQuery`]: ../query_dsl/methods/trait.LoadQuery.html
+/// [`ExecuteDsl`]: crate::query_dsl::methods::ExecuteDsl
+/// [`LoadQuery`]: crate::query_dsl::methods::LoadQuery
 pub trait QueryFragment<DB: Backend> {
     /// Walk over this `QueryFragment` for all passes.
     ///
@@ -137,7 +153,6 @@ pub trait QueryFragment<DB: Backend> {
     /// This method will contain the behavior required for all possible AST
     /// passes. See [`AstPass`] for more details.
     ///
-    /// [`AstPass`]: struct.AstPass.html
     fn walk_ast(&self, pass: AstPass<DB>) -> QueryResult<()>;
 
     /// Converts this `QueryFragment` to its SQL representation.
@@ -156,7 +171,7 @@ pub trait QueryFragment<DB: Backend> {
     fn collect_binds(
         &self,
         out: &mut DB::BindCollector,
-        metadata_lookup: &DB::MetadataLookup,
+        metadata_lookup: &mut DB::MetadataLookup,
     ) -> QueryResult<()> {
         self.walk_ast(AstPass::collect_binds(out, metadata_lookup))
     }
@@ -230,6 +245,17 @@ where
     }
 }
 
+/// A trait used to construct type erased boxed variant of the current query node
+///
+/// Mainly useful for implementing third party backends
+pub trait IntoBoxedClause<'a, DB> {
+    /// Resulting type
+    type BoxedClause;
+
+    /// Convert the given query node in it's boxed representation
+    fn into_boxed(self) -> Self::BoxedClause;
+}
+
 /// Types that can be converted into a complete, typed SQL query.
 ///
 /// This is used internally to automatically add the right select clause when
@@ -272,7 +298,6 @@ impl<T: Query> AsQuery for T {
 /// ```rust
 /// # include!("../doctest_setup.rs");
 /// #
-/// # #[macro_use] extern crate diesel;
 /// # use diesel::*;
 /// # use schema::*;
 /// #
@@ -289,17 +314,17 @@ impl<T: Query> AsQuery for T {
 /// let debug = debug_query::<DB, _>(&query);
 /// # if cfg!(feature = "postgres") {
 /// #     assert_eq!(debug.to_string(), "SELECT \"users\".\"id\", \"users\".\"name\" \
-/// #         FROM \"users\" WHERE \"users\".\"id\" = $1 -- binds: [1]");
+/// #         FROM \"users\" WHERE (\"users\".\"id\" = $1) -- binds: [1]");
 /// # } else {
 /// assert_eq!(debug.to_string(), "SELECT `users`.`id`, `users`.`name` FROM `users` \
-///     WHERE `users`.`id` = ? -- binds: [1]");
+///     WHERE (`users`.`id` = ?) -- binds: [1]");
 /// # }
 ///
 /// let debug = format!("{:?}", debug);
 /// # if !cfg!(feature = "postgres") { // Escaping that string is a pain
 /// let expected = "Query { \
 ///     sql: \"SELECT `users`.`id`, `users`.`name` FROM `users` WHERE \
-///         `users`.`id` = ?\", \
+///         (`users`.`id` = ?)\", \
 ///     binds: [1] \
 /// }";
 /// assert_eq!(debug, expected);

@@ -1,20 +1,19 @@
 use std::io::Write;
 use std::ops::Add;
 
-use crate::deserialize::{self, FromSql};
+use crate::deserialize::{self, FromSql, FromSqlRow};
+use crate::expression::AsExpression;
 use crate::pg::{Pg, PgValue};
 use crate::serialize::{self, IsNull, Output, ToSql};
 use crate::sql_types::{self, Date, Interval, Time, Timestamp, Timestamptz};
 
 #[cfg(feature = "chrono")]
 mod chrono;
-#[cfg(feature = "deprecated-time")]
-mod deprecated_time;
 #[cfg(feature = "quickcheck")]
 mod quickcheck_impls;
 mod std_time;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromSqlRow, AsExpression)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, AsExpression, FromSqlRow)]
 #[sql_type = "Timestamp"]
 #[sql_type = "Timestamptz"]
 /// Timestamps are represented in Postgres as a 64 bit signed integer representing the number of
@@ -22,7 +21,7 @@ mod std_time;
 /// the integer's meaning.
 pub struct PgTimestamp(pub i64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromSqlRow, AsExpression)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, AsExpression, FromSqlRow)]
 #[sql_type = "Date"]
 /// Dates are represented in Postgres as a 32 bit signed integer representing the number of julian
 /// days since January 1st 2000. This struct is a dumb wrapper type, meant only to indicate the
@@ -32,7 +31,7 @@ pub struct PgDate(pub i32);
 /// Time is represented in Postgres as a 64 bit signed integer representing the number of
 /// microseconds since midnight. This struct is a dumb wrapper type, meant only to indicate the
 /// integer's meaning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, FromSqlRow, AsExpression)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, AsExpression, FromSqlRow)]
 #[sql_type = "Time"]
 pub struct PgTime(pub i64);
 
@@ -40,7 +39,7 @@ pub struct PgTime(pub i64);
 /// microseconds, a 32 bit integer representing number of days, and a 32 bit integer
 /// representing number of months. This struct is a dumb wrapper type, meant only to indicate the
 /// meaning of these parts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, FromSqlRow, AsExpression)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[sql_type = "Interval"]
 pub struct PgInterval {
     /// The number of whole microseconds
@@ -60,8 +59,8 @@ impl PgInterval {
     /// how many months are in "40 days" without knowing a precise date.
     pub fn new(microseconds: i64, days: i32, months: i32) -> Self {
         PgInterval {
-            days,
             microseconds,
+            days,
             months,
         }
     }
@@ -89,7 +88,7 @@ impl ToSql<sql_types::Timestamp, Pg> for PgTimestamp {
 }
 
 impl FromSql<sql_types::Timestamp, Pg> for PgTimestamp {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: PgValue<'_>) -> deserialize::Result<Self> {
         FromSql::<sql_types::BigInt, Pg>::from_sql(bytes).map(PgTimestamp)
     }
 }
@@ -101,7 +100,7 @@ impl ToSql<sql_types::Timestamptz, Pg> for PgTimestamp {
 }
 
 impl FromSql<sql_types::Timestamptz, Pg> for PgTimestamp {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: PgValue<'_>) -> deserialize::Result<Self> {
         FromSql::<sql_types::Timestamp, Pg>::from_sql(bytes)
     }
 }
@@ -113,7 +112,7 @@ impl ToSql<sql_types::Date, Pg> for PgDate {
 }
 
 impl FromSql<sql_types::Date, Pg> for PgDate {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: PgValue<'_>) -> deserialize::Result<Self> {
         FromSql::<sql_types::Integer, Pg>::from_sql(bytes).map(PgDate)
     }
 }
@@ -125,7 +124,7 @@ impl ToSql<sql_types::Time, Pg> for PgTime {
 }
 
 impl FromSql<sql_types::Time, Pg> for PgTime {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+    fn from_sql(bytes: PgValue<'_>) -> deserialize::Result<Self> {
         FromSql::<sql_types::BigInt, Pg>::from_sql(bytes).map(PgTime)
     }
 }
@@ -140,12 +139,11 @@ impl ToSql<sql_types::Interval, Pg> for PgInterval {
 }
 
 impl FromSql<sql_types::Interval, Pg> for PgInterval {
-    fn from_sql(value: Option<PgValue<'_>>) -> deserialize::Result<Self> {
-        let value = not_none!(value);
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
         Ok(PgInterval {
-            microseconds: FromSql::<sql_types::BigInt, Pg>::from_sql(Some(value.subslice(0..8)))?,
-            days: FromSql::<sql_types::Integer, Pg>::from_sql(Some(value.subslice(8..12)))?,
-            months: FromSql::<sql_types::Integer, Pg>::from_sql(Some(value.subslice(12..16)))?,
+            microseconds: FromSql::<sql_types::BigInt, Pg>::from_sql(value.subslice(0..8))?,
+            days: FromSql::<sql_types::Integer, Pg>::from_sql(value.subslice(8..12))?,
+            months: FromSql::<sql_types::Integer, Pg>::from_sql(value.subslice(12..16))?,
         })
     }
 }

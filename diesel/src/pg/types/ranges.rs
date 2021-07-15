@@ -2,10 +2,10 @@ use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::Bound;
 use std::io::Write;
 
-use crate::deserialize::{self, FromSql, FromSqlRow, Queryable};
+use crate::deserialize::{self, FromSql, Queryable};
 use crate::expression::bound::Bound as SqlBound;
 use crate::expression::AsExpression;
-use crate::pg::{Pg, PgMetadataLookup, PgTypeMetadata, PgValue};
+use crate::pg::{Pg, PgTypeMetadata, PgValue};
 use crate::serialize::{self, IsNull, Output, ToSql};
 use crate::sql_types::*;
 
@@ -20,16 +20,6 @@ bitflags! {
         const LB_NULL = 0x20;
         const UB_NULL = 0x40;
         const CONTAIN_EMPTY = 0x80;
-    }
-}
-
-impl<T, ST> Queryable<Range<ST>, Pg> for (Bound<T>, Bound<T>)
-where
-    T: FromSql<ST, Pg> + Queryable<ST, Pg>,
-{
-    type Row = Self;
-    fn build(row: Self) -> Self {
-        row
     }
 }
 
@@ -65,21 +55,11 @@ impl<'a, ST, T> AsExpression<Nullable<Range<ST>>> for &'a (Bound<T>, Bound<T>) {
     }
 }
 
-impl<T, ST> FromSqlRow<Range<ST>, Pg> for (Bound<T>, Bound<T>)
-where
-    (Bound<T>, Bound<T>): FromSql<Range<ST>, Pg>,
-{
-    fn build_from_row<R: crate::row::Row<Pg>>(row: &mut R) -> deserialize::Result<Self> {
-        FromSql::<Range<ST>, Pg>::from_sql(row.take())
-    }
-}
-
 impl<T, ST> FromSql<Range<ST>, Pg> for (Bound<T>, Bound<T>)
 where
     T: FromSql<ST, Pg>,
 {
-    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
-        let value = not_none!(bytes);
+    fn from_sql(value: PgValue<'_>) -> deserialize::Result<Self> {
         let mut bytes = value.as_bytes();
         let flags: RangeFlags = RangeFlags::from_bits_truncate(bytes.read_u8()?);
         let mut lower_bound = Bound::Unbounded;
@@ -89,7 +69,7 @@ where
             let elem_size = bytes.read_i32::<NetworkEndian>()?;
             let (elem_bytes, new_bytes) = bytes.split_at(elem_size as usize);
             bytes = new_bytes;
-            let value = T::from_sql(Some(PgValue::new(elem_bytes, value.get_oid())))?;
+            let value = T::from_sql(PgValue::new(elem_bytes, value.get_oid()))?;
 
             lower_bound = if flags.contains(RangeFlags::LB_INC) {
                 Bound::Included(value)
@@ -100,7 +80,7 @@ where
 
         if !flags.contains(RangeFlags::UB_INF) {
             let _size = bytes.read_i32::<NetworkEndian>()?;
-            let value = T::from_sql(Some(PgValue::new(bytes, value.get_oid())))?;
+            let value = T::from_sql(PgValue::new(bytes, value.get_oid()))?;
 
             upper_bound = if flags.contains(RangeFlags::UB_INC) {
                 Bound::Included(value)
@@ -110,6 +90,17 @@ where
         }
 
         Ok((lower_bound, upper_bound))
+    }
+}
+
+impl<T, ST> Queryable<Range<ST>, Pg> for (Bound<T>, Bound<T>)
+where
+    T: FromSql<ST, Pg>,
+{
+    type Row = Self;
+
+    fn build(row: Self) -> deserialize::Result<Self> {
+        Ok(row)
     }
 }
 
@@ -132,22 +123,29 @@ where
 
         out.write_u8(flags.bits())?;
 
+        let mut buffer = Vec::new();
+
         match self.0 {
             Bound::Included(ref value) | Bound::Excluded(ref value) => {
-                let mut buffer = out.with_buffer(Vec::new());
-
-                value.to_sql(&mut buffer)?;
+                {
+                    let mut inner_buffer = Output::new(buffer, out.metadata_lookup());
+                    value.to_sql(&mut inner_buffer)?;
+                    buffer = inner_buffer.into_inner();
+                }
                 out.write_u32::<NetworkEndian>(buffer.len() as u32)?;
                 out.write_all(&buffer)?;
+                buffer.clear();
             }
             Bound::Unbounded => {}
         }
 
         match self.1 {
             Bound::Included(ref value) | Bound::Excluded(ref value) => {
-                let mut buffer = out.with_buffer(Vec::new());
-
-                value.to_sql(&mut buffer)?;
+                {
+                    let mut inner_buffer = Output::new(buffer, out.metadata_lookup());
+                    value.to_sql(&mut inner_buffer)?;
+                    buffer = inner_buffer.into_inner();
+                }
                 out.write_u32::<NetworkEndian>(buffer.len() as u32)?;
                 out.write_all(&buffer)?;
             }
@@ -168,55 +166,37 @@ where
 }
 
 impl HasSqlType<Int4range> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3904,
-            array_oid: 3905,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3904, 3905)
     }
 }
 
 impl HasSqlType<Numrange> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3906,
-            array_oid: 3907,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3906, 3907)
     }
 }
 
 impl HasSqlType<Tsrange> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3908,
-            array_oid: 3909,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3908, 3909)
     }
 }
 
 impl HasSqlType<Tstzrange> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3910,
-            array_oid: 3911,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3910, 3911)
     }
 }
 
 impl HasSqlType<Daterange> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3912,
-            array_oid: 3913,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3912, 3913)
     }
 }
 
 impl HasSqlType<Int8range> for Pg {
-    fn metadata(_: &PgMetadataLookup) -> PgTypeMetadata {
-        PgTypeMetadata {
-            oid: 3926,
-            array_oid: 3927,
-        }
+    fn metadata(_: &mut Self::MetadataLookup) -> PgTypeMetadata {
+        PgTypeMetadata::new(3926, 3927)
     }
 }

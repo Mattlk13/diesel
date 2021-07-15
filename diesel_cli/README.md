@@ -120,7 +120,7 @@ Runs the `down.sql` and then the `up.sql` for the most recent migration.
 Prints table definitions for database schema.
 
 [pending-migrations]: https://docs.rs/diesel_migrations/*/diesel_migrations/fn.run_pending_migrations.html
-[rust-dotenv]: https://github.com/slapresta/rust-dotenv#examples
+[rust-dotenv]: https://github.com/dotenv-rs/dotenv#examples
 
 
 Bash completion
@@ -131,7 +131,7 @@ Diesel can generate a bash completion script for itself:
 #### linux
 
 ```sh
-$ diesel bash-completion > /etc/bash_completion.d/diesel
+$ diesel completions bash > /etc/bash_completion.d/diesel
 ```
 
 
@@ -139,5 +139,5 @@ $ diesel bash-completion > /etc/bash_completion.d/diesel
 
 ```sh
 $ brew install bash-completion  # you may already have this installed
-$ diesel bash-completion > $(brew --prefix)/etc/bash_completion.d/diesel
+$ diesel completions bash > $(brew --prefix)/etc/bash_completion.d/diesel
 ```
